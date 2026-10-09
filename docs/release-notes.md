@@ -10,6 +10,9 @@ Major changes:
 
 Minor changes:
 
+- Azure: Add regression coverage for nested boot check-in GET and POST retries,
+  including worst-case request counts
+
 Packaging changes:
 
 ## Afterburn 5.11.0

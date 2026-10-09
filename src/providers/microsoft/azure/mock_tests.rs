@@ -1,6 +1,7 @@
 use crate::providers::{microsoft::azure, MetadataProvider};
 use crate::retry;
 use mockito::{self, Matcher};
+use std::time::Duration;
 
 /// Response body for goalstate (with certificates endpoint).
 static GOALSTATE_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -220,6 +221,128 @@ fn test_boot_checkin() {
         .max_retries(0)
         .mock_base_url(server.url());
     azure::Azure::with_client(Some(client)).unwrap_err();
+}
+
+#[test]
+fn test_boot_checkin_retries_failed_goalstate() {
+    let mut server = mockito::Server::new();
+    let m_version = mock_fab_version(&mut server);
+    let m_goalstate = server
+        .mock("GET", "/machine/?comp=goalstate")
+        .with_status(500)
+        // Six check-in attempts, each allowing eleven HTTP attempts.
+        .expect(6 * 11)
+        .create();
+    let m_health = server
+        .mock("POST", "/machine/?comp=health")
+        .with_status(200)
+        .expect(0)
+        .create();
+
+    let client = retry::Client::try_new()
+        .unwrap()
+        .initial_backoff(Duration::ZERO)
+        .mock_base_url(server.url());
+    let provider = azure::Azure::with_client(Some(client)).unwrap();
+
+    let err = provider.boot_checkin().unwrap_err();
+
+    m_version.assert();
+    m_goalstate.assert();
+    m_health.assert();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("maximum number of retries (5) reached"));
+    assert!(message.contains("maximum number of retries (10) reached"));
+    assert!(message.contains("failed to fetch: 500"));
+}
+
+#[test]
+fn test_boot_checkin_retries_failed_health_post() {
+    let mut server = mockito::Server::new();
+    let m_version = mock_fab_version(&mut server);
+    let m_goalstate = server
+        .mock("GET", "/machine/?comp=goalstate")
+        .with_body(GOALSTATE_BODY)
+        .with_status(200)
+        .expect(6)
+        .create();
+    let m_health = server
+        .mock("POST", "/machine/?comp=health")
+        .match_body(Matcher::Regex("<State>Ready</State>".to_string()))
+        .with_status(500)
+        // Six check-in attempts, each allowing eleven HTTP attempts.
+        .expect(6 * 11)
+        .create();
+
+    let client = retry::Client::try_new()
+        .unwrap()
+        .initial_backoff(Duration::ZERO)
+        .mock_base_url(server.url());
+    let provider = azure::Azure::with_client(Some(client)).unwrap();
+
+    let err = provider.boot_checkin().unwrap_err();
+
+    m_version.assert();
+    m_goalstate.assert();
+    m_health.assert();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("maximum number of retries (5) reached"));
+    assert!(message.contains("maximum number of retries (10) reached"));
+    assert!(message.contains("POST failed: 500"));
+}
+
+#[test]
+fn test_boot_checkin_worst_case_retries() {
+    let mut server = mockito::Server::new();
+    let m_version = mock_fab_version(&mut server);
+    let mut m_goalstates = Vec::new();
+
+    // Each check-in's GET succeeds only after ten failed HTTP attempts.
+    for _ in 0..6 {
+        m_goalstates.push(
+            server
+                .mock("GET", "/machine/?comp=goalstate")
+                .with_status(500)
+                .expect(10)
+                .create(),
+        );
+        m_goalstates.push(
+            server
+                .mock("GET", "/machine/?comp=goalstate")
+                .with_body(GOALSTATE_BODY)
+                .with_status(200)
+                .expect(1)
+                .create(),
+        );
+    }
+
+    let m_health = server
+        .mock("POST", "/machine/?comp=health")
+        .match_body(Matcher::Regex("<State>Ready</State>".to_string()))
+        .with_status(500)
+        .expect(6 * 11)
+        .create();
+
+    let client = retry::Client::try_new()
+        .unwrap()
+        .initial_backoff(Duration::ZERO)
+        .mock_base_url(server.url());
+    let provider = azure::Azure::with_client(Some(client)).unwrap();
+
+    let err = provider.boot_checkin().unwrap_err();
+
+    m_version.assert();
+    for mock in m_goalstates {
+        mock.assert();
+    }
+    m_health.assert();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("maximum number of retries (5) reached"));
+    assert!(message.contains("maximum number of retries (10) reached"));
+    assert!(message.contains("POST failed: 500"));
 }
 
 #[test]
