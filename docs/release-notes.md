@@ -10,6 +10,8 @@ Major changes:
 
 Minor changes:
 
+- Azure: Read OVF `UserPassword` when rendering the platform-user Ignition fragment
+
 Packaging changes:
 
 ## Afterburn 5.11.0

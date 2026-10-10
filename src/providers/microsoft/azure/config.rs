@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Azure OVF admin-password support.
+//! Azure OVF user-password support.
 //!
-//! Mounts the Azure provisioning ISO, reads `adminPassword` from the OVF
+//! Mounts the Azure provisioning ISO, reads `UserPassword` from the OVF
 //! environment, and hashes it as an sha512-crypt digest for use in an Ignition
 //! `passwd` fragment. The generic Ignition fragment machinery lives in the
 //! `render-ignition` CLI sub-command.
@@ -117,12 +117,12 @@ struct ProvisioningSection {
 
 #[derive(Debug, Deserialize)]
 struct LinuxProvisioningConfigurationSet {
-    #[serde(rename = "AdminPassword", alias = "adminPassword", default)]
-    admin_password: String,
+    #[serde(rename = "UserPassword", default)]
+    user_password: String,
 }
 
-/// OVF is optional; if present, only `adminPassword` is consulted.
-pub(crate) fn read_ovf_admin_password() -> Result<Option<String>> {
+/// OVF is optional; only `UserPassword` is consulted.
+pub(crate) fn read_ovf_user_password() -> Result<Option<String>> {
     let xml = match mount_and_read_ovf() {
         Ok(s) => s,
         Err(e) => {
@@ -132,16 +132,16 @@ pub(crate) fn read_ovf_admin_password() -> Result<Option<String>> {
     };
 
     let env = parse_ovf_env(&xml).context("failed to parse OVF provisioning data")?;
-    let admin_password = env.provisioning_section.linux_prov_conf_set.admin_password;
+    let user_password = env.provisioning_section.linux_prov_conf_set.user_password;
 
-    if admin_password.trim().is_empty() {
+    if user_password.trim().is_empty() {
         Ok(None)
     } else {
-        Ok(Some(admin_password))
+        Ok(Some(user_password))
     }
 }
 
-pub(crate) fn hash_admin_password(password: &str) -> Result<String> {
+pub(crate) fn hash_user_password(password: &str) -> Result<String> {
     let salt = generate_salt().context("failed to generate password salt")?;
     sha512_crypt(password, &salt, PASSWORD_HASH_ROUNDS)
 }
@@ -275,74 +275,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ovf_parse_admin_password() {
+    fn test_ovf_parse_user_password_with_azure_namespaces() {
         let xml = r#"
 <Environment xmlns="http://schemas.dmtf.org/ovf/environment/1"
-    xmlns:wa="http://schemas.microsoft.com/windowsazure">
+    xmlns:oe="http://schemas.dmtf.org/ovf/environment/1"
+    xmlns:wa="http://schemas.microsoft.com/windowsazure"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
     <wa:ProvisioningSection>
         <wa:Version>1.0</wa:Version>
-        <LinuxProvisioningConfigurationSet>
-            <AdminPassword></AdminPassword>
+        <LinuxProvisioningConfigurationSet xmlns="http://schemas.microsoft.com/windowsazure"
+            xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+            <ConfigurationSetType>LinuxProvisioningConfiguration</ConfigurationSetType>
+            <UserName>testuser</UserName>
+            <DisableSshPasswordAuthentication>false</DisableSshPasswordAuthentication>
+            <SSH><PublicKeys /></SSH>
+            <HostName>testvm</HostName><UserPassword>synthetic-test-password</UserPassword>
         </LinuxProvisioningConfigurationSet>
     </wa:ProvisioningSection>
+    <wa:PlatformSettingsSection />
 </Environment>"#;
         let env = parse_ovf_env(xml).unwrap();
         assert_eq!(
-            env.provisioning_section
-                .linux_prov_conf_set
-                .admin_password
-                .as_str(),
-            ""
+            env.provisioning_section.linux_prov_conf_set.user_password,
+            "synthetic-test-password"
         );
     }
 
     #[test]
-    fn test_ovf_parse_supports_lowercase_admin_password_tag() {
-        let xml = r#"
-<Environment xmlns="http://schemas.dmtf.org/ovf/environment/1"
-    xmlns:wa="http://schemas.microsoft.com/windowsazure">
-    <wa:ProvisioningSection>
-        <wa:Version>1.0</wa:Version>
-        <LinuxProvisioningConfigurationSet>
-            <adminPassword></adminPassword>
-        </LinuxProvisioningConfigurationSet>
-    </wa:ProvisioningSection>
-</Environment>"#;
-        let env = parse_ovf_env(xml).unwrap();
-        assert_eq!(
-            env.provisioning_section
+    fn test_ovf_parse_missing_or_empty_user_password() {
+        for password_element in ["", "<UserPassword />"] {
+            let xml = format!(
+                "<Environment><ProvisioningSection>\
+                 <LinuxProvisioningConfigurationSet>{password_element}\
+                 </LinuxProvisioningConfigurationSet>\
+                 </ProvisioningSection></Environment>"
+            );
+            let env = parse_ovf_env(&xml).unwrap();
+            assert!(env
+                .provisioning_section
                 .linux_prov_conf_set
-                .admin_password
-                .as_str(),
-            ""
-        );
+                .user_password
+                .is_empty());
+        }
     }
 
     #[test]
-    fn test_ovf_parse_non_empty_admin_password() {
-        let xml = r#"
-<Environment xmlns="http://schemas.dmtf.org/ovf/environment/1"
-    xmlns:wa="http://schemas.microsoft.com/windowsazure">
-    <wa:ProvisioningSection>
-        <wa:Version>1.0</wa:Version>
-        <LinuxProvisioningConfigurationSet>
-            <AdminPassword>SecretPassword123!</AdminPassword>
-        </LinuxProvisioningConfigurationSet>
-    </wa:ProvisioningSection>
-</Environment>"#;
-        let env = parse_ovf_env(xml).unwrap();
-        assert_eq!(
-            env.provisioning_section
-                .linux_prov_conf_set
-                .admin_password
-                .as_str(),
-            "SecretPassword123!"
-        );
-    }
-
-    #[test]
-    fn test_hash_admin_password_emits_sha512_crypt() {
-        let hash = hash_admin_password("SecretPassword123!").unwrap();
+    fn test_hash_user_password_emits_sha512_crypt() {
+        let hash = hash_user_password("SecretPassword123!").unwrap();
 
         assert!(hash.starts_with("$6$rounds=10000$"));
         let parts: Vec<&str> = hash.splitn(5, '$').collect();

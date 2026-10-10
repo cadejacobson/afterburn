@@ -85,7 +85,7 @@ mod tests {
         hostname: Option<String>,
         admin_username: Option<String>,
         ssh_keys: Vec<&'static str>,
-        admin_password_hash: Option<String>,
+        user_password_hash: Option<String>,
     }
 
     impl MetadataProvider for FakeProvider {
@@ -104,8 +104,8 @@ mod tests {
                 })
                 .collect()
         }
-        fn admin_password_hash(&self) -> Result<Option<String>> {
-            Ok(self.admin_password_hash.clone())
+        fn user_password_hash(&self) -> Result<Option<String>> {
+            Ok(self.user_password_hash.clone())
         }
     }
 
@@ -151,7 +151,7 @@ mod tests {
             ssh_keys: vec![
                 "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQDYVEprvtYJXVOBN0XNKVVRNCRX6BlnNbI+USLGais1sUWPwtSg7z9K9vhbYAPUZcq8c/s5S9dg5vTHbsiyPCIDOKyeHba4MUJq8Oh5b2i71/3BISpyxTBH/uZDHdslW2a+SrPDCeuMMoss9NFhBdKtDkdG9zyi0ibmCP6yMdEX8Q== test",
             ],
-            admin_password_hash: Some("$6$rounds=10000$salt$hash".into()),
+            user_password_hash: Some("$6$rounds=10000$salt$hash".into()),
             ..Default::default()
         };
 
@@ -176,7 +176,7 @@ mod tests {
         let dir = tmp.path().to_str().unwrap();
 
         let provider = FakeProvider {
-            admin_password_hash: Some("$6$rounds=10000$salt$hash".into()),
+            user_password_hash: Some("$6$rounds=10000$salt$hash".into()),
             ..Default::default()
         };
 

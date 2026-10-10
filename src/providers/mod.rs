@@ -234,7 +234,7 @@ pub trait MetadataProvider {
         Ok(None)
     }
 
-    fn admin_password_hash(&self) -> Result<Option<String>> {
+    fn user_password_hash(&self) -> Result<Option<String>> {
         Ok(None)
     }
 
@@ -342,8 +342,8 @@ pub trait MetadataProvider {
             .collect();
 
         let password_hash = self
-            .admin_password_hash()
-            .context("failed to query admin password hash from provider")?;
+            .user_password_hash()
+            .context("failed to query user password hash from provider")?;
 
         if ssh_keys.is_empty() && password_hash.is_none() {
             warn!("admin username present but no SSH keys or password; skipping user fragment");

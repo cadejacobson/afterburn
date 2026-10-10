@@ -417,9 +417,9 @@ impl MetadataProvider for Azure {
         self.fetch_admin_username()
     }
 
-    fn admin_password_hash(&self) -> Result<Option<String>> {
-        config::read_ovf_admin_password()?
-            .map(|password| config::hash_admin_password(&password))
+    fn user_password_hash(&self) -> Result<Option<String>> {
+        config::read_ovf_user_password()?
+            .map(|password| config::hash_user_password(&password))
             .transpose()
     }
 
