@@ -79,7 +79,9 @@ static IMDS_BODY_WITH_KEY: &str = r#"
 /// IMDS publicKeys response body (with no ssh keys)
 static IMDS_BODY_NO_KEYS: &str = r#"[]"#;
 
-static TEST_IP_ADDRESS: &str = "100.115.176.3";
+static TEST_IP_ADDRESS: &str = "10.0.0.4";
+
+static IMDS_DYNAMIC_IPV4_ENDPOINT: &str = "/metadata/instance/network/interface/0/ipv4/ipAddress/0/privateIpAddress?api-version=2021-08-01&format=text";
 
 /// SharedConfig response body matching the one in GOALSTATE_BODY_NO_CERTS
 static SHARED_CONFIG: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -92,7 +94,7 @@ static SHARED_CONFIG: &str = r#"<?xml version="1.0" encoding="utf-8"?>
   <Role guid="{8f2866ba-9a32-e34b-0ebb-d68c961b6bb9}" name="lars-test-1" />
   <OutputEndpoints />
   <Instances>
-    <Instance id="lars-test-1" address="100.115.176.3">
+    <Instance id="lars-test-1" address="10.10.10.10">
       <FaultDomains randomId="0" updateId="0" updateCount="0" />
       <InputEndpoints />
     </Instance>
@@ -158,14 +160,27 @@ fn mock_imds_public_keys(server: &mut mockito::Server, imds_body: &str) -> mocki
         .create()
 }
 
-fn mock_shared_config(server: &mut mockito::Server) -> mockito::Mock {
+fn mock_shared_config(server: &mut mockito::Server, body: &str) -> mockito::Mock {
     // This value must match the one in GOALSTATE_BODY_NO_CERTS
     let shared_config = "/machine/a511aa6d-29e7-4f53-8788-55655dfe848f/f6cd1d7ef1644557b9059345e5ba890c.lars%2Dtest%2D1?comp=config&type=sharedConfig&incarnation=1";
 
     server
         .mock("GET", shared_config)
-        .with_body(SHARED_CONFIG)
+        .with_body(body)
         .with_status(200)
+        .create()
+}
+
+fn mock_imds_dynamic_ipv4(
+    server: &mut mockito::Server,
+    body: &str,
+    status: usize,
+) -> mockito::Mock {
+    server
+        .mock("GET", IMDS_DYNAMIC_IPV4_ENDPOINT)
+        .match_header("Metadata", "true")
+        .with_body(body)
+        .with_status(status)
         .create()
 }
 
@@ -263,7 +278,8 @@ fn test_attributes() {
     let mut server = mockito::Server::new();
     let m_version = mock_fab_version(&mut server);
     let m_goalstate = mock_goalstate(&mut server, false);
-    let m_shared_config = mock_shared_config(&mut server);
+    let m_shared_config = mock_shared_config(&mut server, SHARED_CONFIG);
+    let m_imds = mock_imds_dynamic_ipv4(&mut server, TEST_IP_ADDRESS, 200);
 
     let testvmsize = "testvmsize";
     let endpoint = "/metadata/instance/compute/vmSize?api-version=2017-08-01&format=text";
@@ -285,6 +301,7 @@ fn test_attributes() {
     m_version.assert();
     m_goalstate.assert();
     m_shared_config.assert();
+    m_imds.assert();
 
     m_vmsize.assert();
     let vmsize = r.unwrap();
@@ -292,6 +309,7 @@ fn test_attributes() {
 
     let ip = ip.unwrap();
     assert_eq!(ip, TEST_IP_ADDRESS);
+    assert!(!attributes.contains_key("AZURE_IPV4_VIRTUAL"));
 
     server.reset();
 
@@ -301,6 +319,92 @@ fn test_attributes() {
         .max_retries(0)
         .mock_base_url(server.url());
     azure::Azure::with_client(Some(client)).unwrap_err();
+}
+
+#[test]
+fn test_get_attributes_ignores_shared_config_address_and_preserves_virtual_ipv4() {
+    let mut server = mockito::Server::new();
+    let m_version = mock_fab_version(&mut server);
+    let m_goalstate = mock_goalstate(&mut server, false);
+    let shared_config = SHARED_CONFIG.replace("10.10.10.10", "not-an-ip").replace(
+        "<InputEndpoints />",
+        "<InputEndpoints><Endpoint><loadBalancedPublicAddress>203.0.113.10:80</loadBalancedPublicAddress></Endpoint></InputEndpoints>",
+    );
+    let m_shared_config = mock_shared_config(&mut server, &shared_config);
+    let m_imds = mock_imds_dynamic_ipv4(&mut server, &format!("{TEST_IP_ADDRESS}\n"), 200);
+    let client = retry::Client::try_new()
+        .unwrap()
+        .max_retries(0)
+        .mock_base_url(server.url());
+    let provider = azure::Azure::with_client(Some(client)).unwrap();
+
+    let attributes = provider.get_attributes().unwrap();
+    assert_eq!(
+        attributes.dynamic_ipv4.unwrap().to_string(),
+        TEST_IP_ADDRESS
+    );
+    assert_eq!(attributes.virtual_ipv4.unwrap().to_string(), "203.0.113.10");
+    m_version.assert();
+    m_goalstate.assert();
+    m_shared_config.assert();
+    m_imds.assert();
+}
+
+#[test]
+fn test_get_attributes_rejects_invalid_imds_dynamic_ipv4() {
+    for body in ["", "not-an-ip", "10.0.0.256", "2001:db8::1"] {
+        let mut server = mockito::Server::new();
+        let m_version = mock_fab_version(&mut server);
+        let m_goalstate = mock_goalstate(&mut server, false);
+        let m_shared_config = mock_shared_config(&mut server, SHARED_CONFIG);
+        let m_imds = mock_imds_dynamic_ipv4(&mut server, body, 200);
+        let client = retry::Client::try_new()
+            .unwrap()
+            .max_retries(0)
+            .mock_base_url(server.url());
+        let provider = azure::Azure::with_client(Some(client)).unwrap();
+
+        let error = provider.get_attributes().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("failed to parse IMDS private IPv4 address"),
+            "unexpected error for {body:?}: {error:#}"
+        );
+        m_version.assert();
+        m_goalstate.assert();
+        m_shared_config.assert();
+        m_imds.assert();
+    }
+}
+
+#[test]
+fn test_get_attributes_does_not_fall_back_to_shared_config_on_imds_failure() {
+    for (status, return_on_404, expected_error) in [
+        (404, false, "failed to query IMDS for private IPv4 address"),
+        (500, false, "failed to query IMDS for private IPv4 address"),
+        (404, true, "IMDS did not return a private IPv4 address"),
+    ] {
+        let mut server = mockito::Server::new();
+        let m_version = mock_fab_version(&mut server);
+        let m_goalstate = mock_goalstate(&mut server, false);
+        let m_shared_config = mock_shared_config(&mut server, SHARED_CONFIG);
+        let m_imds = mock_imds_dynamic_ipv4(&mut server, "", status);
+        let client = retry::Client::try_new()
+            .unwrap()
+            .max_retries(0)
+            .return_on_404(return_on_404)
+            .mock_base_url(server.url());
+        let provider = azure::Azure::with_client(Some(client)).unwrap();
+
+        let error = provider.get_attributes().unwrap_err();
+        assert!(
+            format!("{error:#}").contains(expected_error),
+            "unexpected error for HTTP {status}: {error:#}"
+        );
+        m_version.assert();
+        m_goalstate.assert();
+        m_shared_config.assert();
+        m_imds.assert();
+    }
 }
 
 #[test]

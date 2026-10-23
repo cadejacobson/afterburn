@@ -19,7 +19,7 @@ pub(crate) mod config;
 use super::goalstate;
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use anyhow::{anyhow, Context, Result};
 use openssh_keys::PublicKey;
@@ -88,7 +88,7 @@ pub struct Azure {
 #[derive(Debug, Default)]
 struct Attributes {
     pub virtual_ipv4: Option<IpAddr>,
-    pub dynamic_ipv4: Option<IpAddr>,
+    pub dynamic_ipv4: Option<Ipv4Addr>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,9 +279,6 @@ impl Azure {
 
         for instance in shared_config.instances.instances {
             if instance.id == shared_config.incarnation.instance {
-                attributes.dynamic_ipv4 = Some(instance.address.parse().with_context(|| {
-                    format!("failed to parse instance ip address: {}", instance.address)
-                })?);
                 for endpoint in instance.input_endpoints.endpoints {
                     attributes.virtual_ipv4 =
                         match endpoint.load_balanced_public_address.parse::<SocketAddr>() {
@@ -292,7 +289,31 @@ impl Azure {
             }
         }
 
+        attributes.dynamic_ipv4 = Some(self.fetch_dynamic_ipv4()?);
+
         Ok(attributes)
+    }
+
+    fn fetch_dynamic_ipv4(&self) -> Result<Ipv4Addr> {
+        const URL: &str = "metadata/instance/network/interface/0/ipv4/ipAddress/0/privateIpAddress?api-version=2021-08-01&format=text";
+        let url = format!("{}/{}", Self::metadata_endpoint(), URL);
+
+        let address = self
+            .client
+            .clone()
+            .header(
+                HeaderName::from_static("metadata"),
+                HeaderValue::from_static("true"),
+            )
+            .get(retry::Raw, url)
+            .send::<String>()
+            .context("failed to query IMDS for private IPv4 address")?
+            .ok_or_else(|| anyhow!("IMDS did not return a private IPv4 address"))?;
+
+        address
+            .trim()
+            .parse()
+            .with_context(|| format!("failed to parse IMDS private IPv4 address: {address:?}"))
     }
 
     fn fetch_hostname(&self) -> Result<Option<String>> {

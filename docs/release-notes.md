@@ -10,6 +10,7 @@ Major changes:
 
 Minor changes:
 
+- Azure: Fetch the dynamic IPv4 address from IMDS instead of WireServer SharedConfig, which can report an incorrect address
 - Reuse the existing HTTP client when building PATCH, PUT, and POST requests
 - Azure: Read the admin password from OVF `UserPassword` when rendering the platform-user Ignition fragment
 
