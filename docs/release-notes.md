@@ -16,6 +16,8 @@ Minor changes:
 
 Packaging changes:
 
+- Update locked rustls and rustls-webpki dependencies to address security advisories
+
 ## Afterburn 5.11.0
 
 Major changes:
