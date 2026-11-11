@@ -221,6 +221,13 @@ fn truncate_hostname(mut hostname: String) -> Result<String> {
     Ok(hostname)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub enum SudoersPolicy {
+    #[value(name = "required")]
+    PasswordRequired,
+    Passwordless,
+}
+
 pub trait MetadataProvider {
     fn attributes(&self) -> Result<HashMap<String, String>> {
         Ok(HashMap::new())
@@ -301,6 +308,44 @@ pub trait MetadataProvider {
             })?;
             slog_scope::info!("wrote hostname {} to {}", hostname, hostname_file_path);
         }
+        Ok(())
+    }
+
+    fn write_sudoers(&self, sudoers_file_path: String, policy: SudoersPolicy) -> Result<()> {
+        let Some(username) = self
+            .admin_username()
+            .context("failed to query admin username from provider")?
+        else {
+            warn!("sudoers requested, but admin username not available from this provider");
+            return Ok(());
+        };
+
+        let base_username = username.strip_suffix('$').unwrap_or(&username);
+        // Alias-shaped names could grant access to users other than the admin.
+        let is_alias = username
+            .bytes()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase())
+            && username
+                .bytes()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_');
+        if base_username.is_empty()
+            || !base_username
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+            || is_alias
+        {
+            return Err(anyhow!("invalid sudoers username {username:?}"));
+        }
+
+        let tag = match policy {
+            SudoersPolicy::PasswordRequired => "PASSWD",
+            SudoersPolicy::Passwordless => "NOPASSWD",
+        };
+        let contents = format!("{username} ALL=(ALL) {tag}: ALL\n");
+        crate::util::write_file_atomic(Path::new(&sudoers_file_path), contents.as_bytes(), 0o440)
+            .with_context(|| format!("failed to write sudoers file {sudoers_file_path:?}"))?;
+        slog_scope::info!("wrote sudoers file"; "path" => sudoers_file_path);
         Ok(())
     }
 
@@ -485,6 +530,14 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
+    struct SudoersMock(Option<String>);
+
+    impl MetadataProvider for SudoersMock {
+        fn admin_username(&self) -> Result<Option<String>> {
+            Ok(self.0.clone())
+        }
+    }
+
     struct HostnameMock(String);
 
     impl MetadataProvider for HostnameMock {
@@ -566,5 +619,135 @@ mod tests {
         let out = try_write_hostname(&wide);
         assert!(out.len() <= maxlen);
         assert_eq!(out, wide[0..out.len()]);
+    }
+
+    #[test]
+    fn test_write_sudoers_password_required_and_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("sudoers.d/afterburn");
+        let provider = SudoersMock(Some("azureuser".into()));
+
+        provider
+            .write_sudoers(
+                path.to_str().unwrap().into(),
+                SudoersPolicy::PasswordRequired,
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "azureuser ALL=(ALL) PASSWD: ALL\n"
+        );
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o440
+        );
+    }
+
+    #[test]
+    fn test_write_sudoers_passwordless() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("afterburn");
+        fs::write(&path, "old rule\n").unwrap();
+        let provider = SudoersMock(Some("azure-user_1.example$".into()));
+
+        provider
+            .write_sudoers(path.to_str().unwrap().into(), SudoersPolicy::Passwordless)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "azure-user_1.example$ ALL=(ALL) NOPASSWD: ALL\n"
+        );
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o440
+        );
+    }
+
+    #[test]
+    fn test_write_sudoers_rejects_unsafe_username_without_overwriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("afterburn");
+        fs::write(&path, "existing\n").unwrap();
+
+        for username in [
+            "",
+            "ALL",
+            "DEVOPS",
+            "USER_42",
+            "%wheel",
+            "#0",
+            "alice,bob",
+            "alice smith",
+            "$",
+            "alice$$",
+            "alice\nALL ALL=(ALL) NOPASSWD: ALL",
+        ] {
+            let provider = SudoersMock(Some(username.into()));
+            assert!(
+                provider
+                    .write_sudoers(path.to_str().unwrap().into(), SudoersPolicy::Passwordless)
+                    .is_err(),
+                "username {username:?} should be rejected"
+            );
+        }
+        assert_eq!(fs::read_to_string(path).unwrap(), "existing\n");
+    }
+
+    #[test]
+    fn test_write_sudoers_skips_without_username() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("afterburn");
+        let provider = SudoersMock(None);
+
+        provider
+            .write_sudoers(
+                path.to_str().unwrap().into(),
+                SudoersPolicy::PasswordRequired,
+            )
+            .unwrap();
+
+        assert!(!path.exists());
+        fs::write(&path, "existing\n").unwrap();
+        provider
+            .write_sudoers(
+                path.to_str().unwrap().into(),
+                SudoersPolicy::PasswordRequired,
+            )
+            .unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "existing\n");
+    }
+
+    #[test]
+    fn test_write_sudoers_propagates_errors() {
+        struct ErrorProvider;
+        impl MetadataProvider for ErrorProvider {
+            fn admin_username(&self) -> Result<Option<String>> {
+                Err(anyhow!("metadata unavailable"))
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let metadata_path = temp.path().join("metadata-result");
+        let err = ErrorProvider
+            .write_sudoers(
+                metadata_path.to_str().unwrap().into(),
+                SudoersPolicy::PasswordRequired,
+            )
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("metadata unavailable"));
+        assert!(!metadata_path.exists());
+
+        let parent = temp.path().join("not-a-directory");
+        fs::write(&parent, "existing\n").unwrap();
+        let path = parent.join("afterburn");
+
+        assert!(SudoersMock(Some("azureuser".into()))
+            .write_sudoers(
+                path.to_str().unwrap().into(),
+                SudoersPolicy::PasswordRequired
+            )
+            .is_err());
     }
 }

@@ -1,6 +1,7 @@
 //! `multi` CLI sub-command.
 
 use crate::metadata;
+use crate::providers::SudoersPolicy;
 use anyhow::{Context, Result};
 use clap::{ArgGroup, Parser};
 
@@ -35,6 +36,17 @@ pub struct CliMulti {
     /// Update SSH keys for the given user
     #[arg(long = "ssh-keys", value_name = "username")]
     ssh_keys_user: Option<String>,
+    /// Write a sudoers rule granting the provider admin full sudo access
+    #[arg(long = "sudoers", value_name = "path")]
+    sudoers_file: Option<String>,
+    /// Whether the provider admin must authenticate for sudo
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = SudoersPolicy::PasswordRequired,
+        requires = "sudoers_file"
+    )]
+    sudoers_password_policy: SudoersPolicy,
     /// Whether this command was translated from legacy CLI args
     #[arg(long, hide = true)]
     legacy_cli: bool,
@@ -52,6 +64,7 @@ impl CliMulti {
             && !self.check_in
             && self.ssh_keys_user.is_none()
             && self.hostname_file.is_none()
+            && self.sudoers_file.is_none()
         {
             slog_scope::warn!("multi: no action specified");
         }
@@ -74,6 +87,12 @@ impl CliMulti {
         self.hostname_file
             .map_or(Ok(()), |x| metadata.write_hostname(x))
             .context("writing hostname")?;
+
+        self.sudoers_file
+            .map_or(Ok(()), |x| {
+                metadata.write_sudoers(x, self.sudoers_password_policy)
+            })
+            .context("writing sudoers file")?;
 
         // write network units if configured to do so
         self.network_units_dir
@@ -98,5 +117,66 @@ impl CliMulti {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sudoers_arguments() {
+        let default = CliMulti::try_parse_from([
+            "afterburn",
+            "--provider",
+            "azure",
+            "--sudoers",
+            "/tmp/afterburn",
+        ])
+        .unwrap();
+        assert_eq!(default.sudoers_file.as_deref(), Some("/tmp/afterburn"));
+        assert_eq!(
+            default.sudoers_password_policy,
+            SudoersPolicy::PasswordRequired
+        );
+
+        for (value, expected) in [
+            ("required", SudoersPolicy::PasswordRequired),
+            ("passwordless", SudoersPolicy::Passwordless),
+        ] {
+            let config = CliMulti::try_parse_from([
+                "afterburn",
+                "--provider",
+                "azure",
+                "--sudoers",
+                "/tmp/afterburn",
+                "--sudoers-password-policy",
+                value,
+            ])
+            .unwrap();
+            assert_eq!(config.sudoers_password_policy, expected);
+        }
+    }
+
+    #[test]
+    fn test_sudoers_policy_requires_path_and_valid_value() {
+        assert!(CliMulti::try_parse_from([
+            "afterburn",
+            "--provider",
+            "azure",
+            "--sudoers-password-policy",
+            "passwordless",
+        ])
+        .is_err());
+        assert!(CliMulti::try_parse_from([
+            "afterburn",
+            "--provider",
+            "azure",
+            "--sudoers",
+            "/tmp/afterburn",
+            "--sudoers-password-policy",
+            "invalid",
+        ])
+        .is_err());
     }
 }

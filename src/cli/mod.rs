@@ -165,6 +165,24 @@ mod tests {
     }
 
     #[test]
+    fn test_legacy_sudoers_args() {
+        let args = [
+            "afterburn",
+            "--provider",
+            "azure",
+            "--sudoers",
+            "/tmp/afterburn",
+            "--sudoers-password-policy",
+            "passwordless",
+        ]
+        .into_iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+        assert!(matches!(parse_args(args).unwrap(), CliConfig::Multi(_)));
+    }
+
+    #[test]
     fn test_exp_cmd() {
         let args: Vec<_> = [
             "afterburn",

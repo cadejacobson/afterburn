@@ -10,6 +10,7 @@ Major changes:
 
 Minor changes:
 
+- Add `multi --sudoers` to write a sudoers rule for the provider admin user
 - Reuse the existing HTTP client when building PATCH, PUT, and POST requests
 - Azure: Read the admin password from OVF `UserPassword` when rendering the platform-user Ignition fragment
 - DigitalOcean: Add the `DIGITALOCEAN_INSTANCE_ID` attribute
